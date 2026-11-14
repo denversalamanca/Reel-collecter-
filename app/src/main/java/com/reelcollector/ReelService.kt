@@ -207,7 +207,7 @@ class ReelService : AccessibilityService() {
         if (added >= maxLinks) { stopCollecting("Target pura ho gaya"); return }
         if (bad >= 6) { fail("Links nahi ban rahe ya sab repeat"); return }
         swipe()
-        h.postDelayed({ step() }, intervalMs)
+        h.postDelayed({ step() }, intervalMs + 600)
     }
 
     // ---------- clipboard ----------
@@ -237,15 +237,34 @@ class ReelService : AccessibilityService() {
     }
 
     // ---------- gestures ----------
+    // lamba aur dheema swipe: neeche se upar lagbhag poori screen
     private fun swipe() {
         val w = resources.displayMetrics.widthPixels
         val hh = resources.displayMetrics.heightPixels
         val p = Path()
-        p.moveTo(w * 0.5f, hh * 0.75f)
-        p.lineTo(w * 0.5f, hh * 0.25f)
+        p.moveTo(w * 0.5f, hh * 0.85f)
+        p.lineTo(w * 0.5f, hh * 0.15f)
         val g = GestureDescription.Builder()
-            .addStroke(GestureDescription.StrokeDescription(p, 0, 250)).build()
-        dispatchGesture(g, null, null)
+            .addStroke(GestureDescription.StrokeDescription(p, 0, 450)).build()
+        val cb = object : AccessibilityService.GestureResultCallback() {
+            override fun onCancelled(gestureDescription: GestureDescription?) {
+                scrollByAction()
+            }
+        }
+        dispatchGesture(g, cb, null)
+    }
+
+    // gesture cancel ho jaye to Android ke scroll command se koshish
+    private fun scrollByAction() {
+        if (!running) return
+        val root = rootInActiveWindow ?: return
+        val hh = resources.displayMetrics.heightPixels
+        val n = walk(root) { x ->
+            val r = Rect()
+            x.getBoundsInScreen(r)
+            x.isScrollable && r.height() > hh * 0.5
+        }
+        n?.performAction(AccessibilityNodeInfo.ACTION_SCROLL_FORWARD)
     }
 
     private fun tapNode(n: AccessibilityNodeInfo) {
