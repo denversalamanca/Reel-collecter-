@@ -2,6 +2,7 @@ package com.reelcollector
 
 import android.accessibilityservice.AccessibilityService
 import android.accessibilityservice.GestureDescription
+import android.content.ClipData
 import android.content.ClipboardManager
 import android.content.Context
 import android.content.Intent
@@ -12,6 +13,7 @@ import android.os.Handler
 import android.os.Looper
 import android.view.Gravity
 import android.view.KeyEvent
+import android.view.View
 import android.view.WindowManager
 import android.view.accessibility.AccessibilityEvent
 import android.view.accessibility.AccessibilityNodeInfo
@@ -51,7 +53,6 @@ class ReelService : AccessibilityService() {
         return super.onUnbind(intent)
     }
 
-    // Volume Down dabao = turant stop
     override fun onKeyEvent(event: KeyEvent): Boolean {
         if (running && event.keyCode == KeyEvent.KEYCODE_VOLUME_DOWN &&
             event.action == KeyEvent.ACTION_DOWN
@@ -61,8 +62,6 @@ class ReelService : AccessibilityService() {
         }
         return false
     }
-
-    fun isRunning() = running
 
     fun startCollecting(intervalSec: Int, max: Int) {
         intervalMs = (intervalSec.coerceAtLeast(2)) * 1000L
@@ -82,6 +81,14 @@ class ReelService : AccessibilityService() {
         hideOverlay()
     }
 
+    private fun fail(reason: String) {
+        try {
+            val cm = getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+            cm.setPrimaryClip(ClipData.newPlainText("debug", dump()))
+        } catch (e: Exception) { }
+        stopCollecting("$reason - debug text clipboard me hai")
+    }
+
     // ---------- main loop ----------
     private fun step() {
         if (!running) return
@@ -93,51 +100,96 @@ class ReelService : AccessibilityService() {
             return
         }
         misses = 0
-        val share = walk(root) { isShare(it) }
-        if (share == null) {          // shayad reel nahi hai; bas scroll karo
+        // share sheet pehle se khula hai to band karo
+        if (find { isCopy(it) } != null) {
+            performGlobalAction(GLOBAL_ACTION_BACK)
             bad++
-            if (bad >= 8) { stopCollecting("Share button nahi mila"); return }
-            swipe()
-            h.postDelayed({ step() }, intervalMs)
+            if (bad >= 6) { fail("Share sheet band nahi ho rahi"); return }
+            h.postDelayed({ step() }, 900)
+            return
+        }
+        val share = find { isShare(it) }
+        if (share == null) {
+            bad++
+            if (bad >= 6) { fail("Share button nahi mila (Reels screen par ho?)"); return }
+            h.postDelayed({ step() }, 1500)
             return
         }
         clickUp(share)
-        h.postDelayed({ afterShare() }, 1200)
+        h.postDelayed({ tryCopy(0) }, 1300)
     }
 
-    private fun afterShare() {
+    private fun tryCopy(attempt: Int) {
         if (!running) return
-        val root = rootInActiveWindow
-        val copy = walk(root) { isCopy(it) }
+        val copy = find { isCopy(it) }
         if (copy == null) {
-            performGlobalAction(GLOBAL_ACTION_BACK)   // share sheet band karo
-            bad++
-        } else {
-            clickUp(copy)
+            if (attempt < 3) { h.postDelayed({ tryCopy(attempt + 1) }, 800); return }
+            fail("Copy link button nahi mila")
+            return
         }
-        h.postDelayed({ afterCopy() }, 700)
+        if (!clickUp(copy)) tapNode(copy)
+        h.postDelayed({ verifyCopy() }, 900)
+    }
+
+    private fun verifyCopy() {
+        if (!running) return
+        val again = find { isCopy(it) }
+        if (again != null) tapNode(again)   // click kaam nahi kiya to gesture se dabao
+        h.postDelayed({ afterCopy() }, 900)
     }
 
     private fun afterCopy() {
         if (!running) return
-        val text = try {
-            val cm = getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
-            cm.primaryClip?.getItemAt(0)?.coerceToText(this)?.toString()
-        } catch (e: Exception) { null }
-
-        val m = if (text != null) idRegex.find(text) else null
-        if (m == null) {
-            bad++
-        } else {
-            val link = "https://www.instagram.com/reel/" + m.groupValues[1] + "/"
-            if (Store.add(this, link)) { added++; bad = 0 } else bad++
+        readClipboard { text ->
+            if (running) {
+                val m = if (text != null) idRegex.find(text) else null
+                if (m == null) {
+                    bad++
+                } else {
+                    val link = "https://www.instagram.com/reel/" + m.groupValues[1] + "/"
+                    if (Store.add(this, link)) { added++; bad = 0 } else bad++
+                }
+                setOverlayText("STOP  •  $added links")
+                if (find { isCopy(it) } != null) performGlobalAction(GLOBAL_ACTION_BACK)
+                h.postDelayed({ finishReel() }, 800)
+            }
         }
-        setOverlayText("STOP  •  $added links")
+    }
 
+    private fun finishReel() {
+        if (!running) return
         if (added >= maxLinks) { stopCollecting("Target pura ho gaya"); return }
-        if (bad >= 8) { stopCollecting("Links nahi aa rahe / sab repeat"); return }
+        if (bad >= 6) { fail("Links nahi ban rahe ya sab repeat"); return }
+        if (find { isCopy(it) } != null) { fail("Share sheet band nahi hui"); return }
         swipe()
         h.postDelayed({ step() }, intervalMs)
+    }
+
+    // ---------- clipboard ----------
+    private fun clipText(): String? = try {
+        val cm = getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+        cm.primaryClip?.getItemAt(0)?.coerceToText(this)?.toString()
+    } catch (e: Exception) { null }
+
+    private fun readClipboard(done: (String?) -> Unit) {
+        val t = clipText()
+        if (t != null && idRegex.containsMatchIn(t)) { done(t); return }
+        // Android background clipboard roknaa hai: chhoti focus window se try
+        val v = View(this)
+        val lp = WindowManager.LayoutParams(
+            1, 1,
+            WindowManager.LayoutParams.TYPE_ACCESSIBILITY_OVERLAY,
+            WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE or
+                    WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS,
+            PixelFormat.TRANSLUCENT
+        )
+        val wm = getSystemService(Context.WINDOW_SERVICE) as WindowManager
+        try { wm.addView(v, lp) } catch (e: Exception) { done(t); return }
+        h.postDelayed({
+            val t2 = clipText()
+            try { wm.removeView(v) } catch (e: Exception) { }
+            done(t2 ?: t)
+        }, 300)
     }
 
     // ---------- helpers ----------
@@ -150,6 +202,22 @@ class ReelService : AccessibilityService() {
         val g = GestureDescription.Builder()
             .addStroke(GestureDescription.StrokeDescription(p, 0, 250)).build()
         dispatchGesture(g, null, null)
+    }
+
+    private fun tapNode(n: AccessibilityNodeInfo) {
+        val r = Rect()
+        n.getBoundsInScreen(r)
+        val p = Path()
+        p.moveTo(r.centerX().toFloat(), r.centerY().toFloat())
+        val g = GestureDescription.Builder()
+            .addStroke(GestureDescription.StrokeDescription(p, 0, 60)).build()
+        dispatchGesture(g, null, null)
+    }
+
+    private fun find(f: (AccessibilityNodeInfo) -> Boolean): AccessibilityNodeInfo? {
+        val root = rootInActiveWindow ?: return null
+        if (root.packageName?.toString() != IG) return null
+        return walk(root, f)
     }
 
     private fun walk(n: AccessibilityNodeInfo?, f: (AccessibilityNodeInfo) -> Boolean): AccessibilityNodeInfo? {
@@ -190,6 +258,24 @@ class ReelService : AccessibilityService() {
         if (t.isBlank()) return false
         return t.contains("copy link") || t.contains("link copy") ||
                 (t.contains("लिंक") && t.contains("कॉपी"))
+    }
+
+    private fun dump(): String {
+        val sb = StringBuilder()
+        var count = 0
+        fun rec(x: AccessibilityNodeInfo?) {
+            if (x == null || count > 80) return
+            val t = (x.text ?: "").toString()
+            val c = (x.contentDescription ?: "").toString()
+            if (t.isNotEmpty() || c.isNotEmpty()) {
+                sb.append("t=").append(t.take(30)).append(" | d=").append(c.take(30))
+                    .append(" | click=").append(x.isClickable).append("\n")
+                count++
+            }
+            for (i in 0 until x.childCount) rec(x.getChild(i))
+        }
+        rec(rootInActiveWindow)
+        return sb.toString()
     }
 
     // ---------- floating STOP button ----------
