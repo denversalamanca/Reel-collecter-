@@ -1,0 +1,4 @@
+<resources>
+    <string name="app_name">Reel Link Collector</string>
+    <string name="svc_desc">Instagram app me reels ko khud scroll karta hai aur unke links save karta hai.</string>
+</resources>
