@@ -3,9 +3,13 @@ package com.reelcollector
 import android.app.Activity
 import android.content.ClipData
 import android.content.ClipboardManager
+import android.content.ContentValues
 import android.content.Context
 import android.content.Intent
+import android.os.Build
 import android.os.Bundle
+import android.os.Environment
+import android.provider.MediaStore
 import android.provider.Settings
 import android.text.InputType
 import android.widget.Button
@@ -14,6 +18,10 @@ import android.widget.LinearLayout
 import android.widget.ScrollView
 import android.widget.TextView
 import android.widget.Toast
+import java.io.File
+import java.text.SimpleDateFormat
+import java.util.Date
+import java.util.Locale
 
 class MainActivity : Activity() {
 
@@ -60,8 +68,9 @@ class MainActivity : Activity() {
         maxE.setText("200"); l.addView(maxE)
 
         btn("2) START (Instagram khulega)") { start() }
+        btn("TXT me download karo") { saveTxt() }
         btn("Saare links copy karo") { copyAll() }
-        btn("Links share / save karo") { shareAll() }
+        btn("Links share karo") { shareAll() }
         btn("List saaf karo") {
             Store.clear(this); refresh()
         }
@@ -87,25 +96,55 @@ class MainActivity : Activity() {
                 "\nSave hue links: " + Store.all(this).size
     }
 
+    private fun toast(t: String) = Toast.makeText(this, t, Toast.LENGTH_LONG).show()
+
     private fun start() {
         val inst = ReelService.instance
         if (inst == null) {
-            Toast.makeText(this, "Pehle Accessibility me service ON karo", Toast.LENGTH_LONG).show()
+            toast("Pehle Accessibility me service ON karo")
             return
         }
         val sec = intervalE.text.toString().toIntOrNull() ?: 3
         val max = maxE.text.toString().toIntOrNull() ?: 200
         inst.startCollecting(sec, max)
         val i = packageManager.getLaunchIntentForPackage(ReelService.IG)
-        if (i == null) Toast.makeText(this, "Instagram app nahi mila", Toast.LENGTH_LONG).show()
+        if (i == null) toast("Instagram app nahi mila")
         else startActivity(i)
+    }
+
+    private fun saveTxt() {
+        val list = Store.all(this)
+        if (list.isEmpty()) {
+            toast("Abhi koi link save nahi hai")
+            return
+        }
+        val stamp = SimpleDateFormat("yyyyMMdd_HHmmss", Locale.US).format(Date())
+        val name = "reel_links_$stamp.txt"
+        val text = list.joinToString("\n")
+        try {
+            if (Build.VERSION.SDK_INT >= 29) {
+                val cv = ContentValues()
+                cv.put(MediaStore.Downloads.DISPLAY_NAME, name)
+                cv.put(MediaStore.Downloads.MIME_TYPE, "text/plain")
+                cv.put(MediaStore.Downloads.RELATIVE_PATH, Environment.DIRECTORY_DOWNLOADS)
+                val uri = contentResolver.insert(MediaStore.Downloads.EXTERNAL_CONTENT_URI, cv)!!
+                contentResolver.openOutputStream(uri)!!.use { it.write(text.toByteArray()) }
+                toast("Downloads folder me save hua: $name (${list.size} links)")
+            } else {
+                val f = File(getExternalFilesDir(null), name)
+                f.writeText(text)
+                toast("Save hua: ${f.path}")
+            }
+        } catch (e: Exception) {
+            toast("Save nahi hua: ${e.message}")
+        }
     }
 
     private fun copyAll() {
         val t = Store.all(this).joinToString("\n")
         val cm = getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
         cm.setPrimaryClip(ClipData.newPlainText("links", t))
-        Toast.makeText(this, "${Store.all(this).size} links copy ho gaye", Toast.LENGTH_SHORT).show()
+        toast("${Store.all(this).size} links copy ho gaye")
     }
 
     private fun shareAll() {
