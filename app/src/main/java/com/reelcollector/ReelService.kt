@@ -26,15 +26,16 @@ class ReelService : AccessibilityService() {
         @Volatile
         var instance: ReelService? = null
         const val IG = "com.instagram.android"
-        const val G = 1000L   // har kadam ke beech 1 second
     }
 
     private val h = Handler(Looper.getMainLooper())
     private var running = false
+    private var intervalMs = 2000L
     private var maxLinks = 200
     private var added = 0
     private var bad = 0
     private var misses = 0
+    private var lastId: String? = null
     private var overlay: Button? = null
 
     private val idRegex =
@@ -64,8 +65,9 @@ class ReelService : AccessibilityService() {
     }
 
     fun startCollecting(intervalSec: Int, max: Int) {
+        intervalMs = intervalSec.coerceAtLeast(1) * 1000L
         maxLinks = max.coerceAtLeast(1)
-        added = 0; bad = 0; misses = 0
+        added = 0; bad = 0; misses = 0; lastId = null
         running = true
         showOverlay()
         setOverlayText("STOP (6 sec me shuru)")
@@ -88,8 +90,21 @@ class ReelService : AccessibilityService() {
         stopCollecting("$reason - debug text clipboard me hai")
     }
 
-    // ================= ORDER (har kadam 1 sec) =================
-    // Share -> Copy link -> Back -> (share list band dikhe to) Scroll -> Share ...
+    // condition sach hone tak ruko (har 250ms check), timeout par no() chalao
+    private fun waitFor(timeout: Long, cond: () -> Boolean, ok: () -> Unit, no: () -> Unit) {
+        val t0 = System.currentTimeMillis()
+        fun poll() {
+            if (!running) return
+            if (cond()) { ok(); return }
+            if (System.currentTimeMillis() - t0 > timeout) { no(); return }
+            h.postDelayed({ poll() }, 250)
+        }
+        poll()
+    }
+
+    // ================= ORDER =================
+    // Share -> (Copy link dikhe) -> Copy link -> (naya link aaye) -> Back
+    // -> (share list band dikhe) -> Scroll -> wait -> Share ...
 
     // 1) Share dabao
     private fun step() {
@@ -98,78 +113,101 @@ class ReelService : AccessibilityService() {
         if (root == null || root.packageName?.toString() != IG) {
             misses++
             if (misses > 10) { stopCollecting("Instagram screen nahi mili"); return }
-            h.postDelayed({ step() }, G)
+            h.postDelayed({ step() }, 1000)
             return
         }
         misses = 0
         // pichhli share list khuli reh gayi ho to pehle Back
         if (find { isCopy(it) } != null) {
             performGlobalAction(GLOBAL_ACTION_BACK)
-            h.postDelayed({ step() }, G)
+            h.postDelayed({ step() }, 1200)
             return
         }
         val share = find { isShare(it) }
         if (share == null) {
             bad++
             if (bad >= 6) { fail("Share button nahi mila (Reels screen par ho?)"); return }
-            h.postDelayed({ step() }, G)
+            h.postDelayed({ step() }, 1200)
             return
         }
         if (!clickUp(share)) tapNode(share)
-        h.postDelayed({ tryCopy(0) }, G)
+        // Copy link dikhne tak ruko (dheeme phone par zyada time lagta hai)
+        waitFor(6000, { find { isCopy(it) } != null },
+            { h.postDelayed({ tryCopy() }, 600) },
+            {
+                bad++
+                if (bad >= 6) fail("Share list khul nahi rahi") else step()
+            })
     }
 
     // 2) Copy link dabao
-    private fun tryCopy(attempt: Int) {
+    private fun tryCopy() {
         if (!running) return
         val copy = find { isCopy(it) }
         if (copy == null) {
-            if (attempt < 3) { h.postDelayed({ tryCopy(attempt + 1) }, G); return }
             fail("Copy link button nahi mila")
             return
         }
         if (!clickUp(copy)) tapNode(copy)
-        h.postDelayed({ afterCopy() }, G)
+        h.postDelayed({ afterCopy(0) }, 1000)
     }
 
-    // 3) link save karo aur Back dabao (bina kisi check ke)
-    private fun afterCopy() {
+    // 3) naya link save karo, phir Back
+    private fun afterCopy(attempt: Int) {
         if (!running) return
         readClipboard { text ->
             if (running) {
                 val m = if (text != null) idRegex.find(text) else null
-                if (m == null) {
-                    bad++
+                val id = m?.groupValues?.get(1)
+                // link nahi mila ya purana hi hai: thoda aur ruk ke dobara padho
+                if ((m == null || id == lastId) && attempt < 2) {
+                    h.postDelayed({ afterCopy(attempt + 1) }, 900)
                 } else {
-                    val link = "https://www.instagram.com/reel/" + m.groupValues[1] + "/"
-                    if (Store.add(this, link)) { added++; bad = 0 } else bad++
+                    if (m == null || id == null) {
+                        bad++
+                    } else {
+                        val link = "https://www.instagram.com/reel/$id/"
+                        if (Store.add(this, link)) { added++; bad = 0 } else bad++
+                        lastId = id
+                    }
+                    setOverlayText("STOP  •  $added links")
+                    performGlobalAction(GLOBAL_ACTION_BACK)
+                    h.postDelayed({ closeAndScroll() }, 300)
                 }
-                setOverlayText("STOP  •  $added links")
-                performGlobalAction(GLOBAL_ACTION_BACK)
-                h.postDelayed({ checkClosed(0) }, G)
             }
         }
     }
 
-    // 4) Scroll tabhi jab reel ka Share button wapas dikhe (yaani list band ho gayi)
-    private fun checkClosed(n: Int) {
-        if (!running) return
-        if (find { isShare(it) } != null) {
-            finishReel()
-            return
+    // 4) list band hone tak ruko (zarurat ho to Back dobara), phir scroll
+    private fun closeAndScroll() {
+        val t0 = System.currentTimeMillis()
+        var backs = 1
+        fun poll() {
+            if (!running) return
+            val share = find { isShare(it) } != null
+            val copy = find { isCopy(it) } != null
+            if (share && !copy) {
+                h.postDelayed({ finishReel() }, 500)
+                return
+            }
+            val el = System.currentTimeMillis() - t0
+            if (el > 9000) { fail("Share list band nahi hui"); return }
+            if (copy && el > backs * 2500L) {
+                performGlobalAction(GLOBAL_ACTION_BACK)
+                backs++
+            }
+            h.postDelayed({ poll() }, 300)
         }
-        if (n >= 3) { fail("Share list band nahi hui ya reel screen nahi dikh rahi"); return }
-        if (find { isCopy(it) } != null) performGlobalAction(GLOBAL_ACTION_BACK)
-        h.postDelayed({ checkClosed(n + 1) }, G)
+        poll()
     }
 
-    // 5) Scroll, phir 1 sec baad agli reel
+    // 5) Scroll, phir agli reel ke liye wait
     private fun finishReel() {
         if (!running) return
         if (added >= maxLinks) { stopCollecting("Target pura ho gaya"); return }
         if (bad >= 6) { fail("Links nahi ban rahe ya sab repeat"); return }
         swipe()
-        h.postDelayed({ step() }, G)
+        h.postDelayed({ step() }, intervalMs)
     }
 
     // ---------- clipboard ----------
