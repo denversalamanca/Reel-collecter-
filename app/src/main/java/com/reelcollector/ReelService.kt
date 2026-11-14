@@ -89,7 +89,11 @@ class ReelService : AccessibilityService() {
         stopCollecting("$reason - debug text clipboard me hai")
     }
 
-    // ---------- main loop ----------
+    // ================= ORDER =================
+    // 1) Share dabao  2) Copy link dabao  3) 1 sec ruko, link save, Back
+    // 4) Reel scroll  5) agli reel par dobara
+
+    // 1) Share dabao
     private fun step() {
         if (!running) return
         val root = rootInActiveWindow
@@ -100,9 +104,10 @@ class ReelService : AccessibilityService() {
             return
         }
         misses = 0
-        // share sheet pehle se khula hai to pehle band karo
+        // pichhli share list khuli reh gayi ho to pehle Back
         if (find { isCopy(it) } != null) {
-            closeSheet(0) { step() }
+            performGlobalAction(GLOBAL_ACTION_BACK)
+            h.postDelayed({ step() }, 900)
             return
         }
         val share = find { isShare(it) }
@@ -112,10 +117,11 @@ class ReelService : AccessibilityService() {
             h.postDelayed({ step() }, 1500)
             return
         }
-        clickUp(share)
-        h.postDelayed({ tryCopy(0) }, 1300)
+        if (!clickUp(share)) tapNode(share)
+        h.postDelayed({ tryCopy(0) }, 1200)
     }
 
+    // 2) Copy link dabao
     private fun tryCopy(attempt: Int) {
         if (!running) return
         val copy = find { isCopy(it) }
@@ -125,58 +131,51 @@ class ReelService : AccessibilityService() {
             return
         }
         if (!clickUp(copy)) tapNode(copy)
-        h.postDelayed({ readLink(false) }, 900)
+        // 3) 1 second baad
+        h.postDelayed({ afterCopy() }, 1000)
     }
 
-    private fun readLink(retried: Boolean) {
+    // 3) link save + Back
+    private fun afterCopy() {
         if (!running) return
         readClipboard { text ->
-            if (!running) return@readClipboard
-            val m = if (text != null) idRegex.find(text) else null
-            if (m == null && !retried) {
-                // link nahi mila: ek baar gesture se Copy link dabake dekho
-                val c = find { isCopy(it) }
-                if (c != null) {
-                    tapNode(c)
-                    h.postDelayed({ readLink(true) }, 900)
-                    return@readClipboard
+            if (running) {
+                val m = if (text != null) idRegex.find(text) else null
+                if (m == null) {
+                    bad++
+                } else {
+                    val link = "https://www.instagram.com/reel/" + m.groupValues[1] + "/"
+                    if (Store.add(this, link)) { added++; bad = 0 } else bad++
                 }
+                setOverlayText("STOP  •  $added links")
+                backThenScroll(0)
             }
-            if (m == null) {
-                bad++
-            } else {
-                val link = "https://www.instagram.com/reel/" + m.groupValues[1] + "/"
-                if (Store.add(this, link)) { added++; bad = 0 } else bad++
-            }
-            setOverlayText("STOP  •  $added links")
-            closeSheet(0) { finishReel() }
         }
     }
 
-    // share sheet band karne ke 4 tareeke, ek ke baad ek
-    private fun closeSheet(n: Int, done: () -> Unit) {
+    // Back dabao (sirf agar share list dikh rahi hai), phir scroll
+    private fun backThenScroll(n: Int) {
         if (!running) return
         if (find { isCopy(it) } == null) {
-            h.postDelayed({ done() }, 500)
+            finishReel()
             return
         }
-        if (n >= 4) { fail("Share sheet band nahi ho rahi"); return }
-        when (n) {
-            0 -> performGlobalAction(GLOBAL_ACTION_BACK)
-            1 -> swipeDown()
-            2 -> tapAt(resources.displayMetrics.widthPixels * 0.5f,
-                       resources.displayMetrics.heightPixels * 0.2f)
-            else -> performGlobalAction(GLOBAL_ACTION_BACK)
-        }
-        h.postDelayed({ closeSheet(n + 1, done) }, 900)
+        if (n >= 3) { fail("Share list band nahi ho rahi"); return }
+        performGlobalAction(GLOBAL_ACTION_BACK)
+        h.postDelayed({ backThenScroll(n + 1) }, 900)
     }
 
+    // 4) Reel scroll, 5) agli reel
     private fun finishReel() {
         if (!running) return
         if (added >= maxLinks) { stopCollecting("Target pura ho gaya"); return }
         if (bad >= 6) { fail("Links nahi ban rahe ya sab repeat"); return }
-        swipe()
-        h.postDelayed({ step() }, intervalMs)
+        h.postDelayed({
+            if (running) {
+                swipe()
+                h.postDelayed({ step() }, intervalMs)
+            }
+        }, 500)
     }
 
     // ---------- clipboard ----------
@@ -217,29 +216,14 @@ class ReelService : AccessibilityService() {
         dispatchGesture(g, null, null)
     }
 
-    private fun swipeDown() {
-        val w = resources.displayMetrics.widthPixels
-        val hh = resources.displayMetrics.heightPixels
-        val p = Path()
-        p.moveTo(w * 0.5f, hh * 0.42f)
-        p.lineTo(w * 0.5f, hh * 0.95f)
-        val g = GestureDescription.Builder()
-            .addStroke(GestureDescription.StrokeDescription(p, 0, 300)).build()
-        dispatchGesture(g, null, null)
-    }
-
-    private fun tapAt(x: Float, y: Float) {
-        val p = Path()
-        p.moveTo(x, y)
-        val g = GestureDescription.Builder()
-            .addStroke(GestureDescription.StrokeDescription(p, 0, 60)).build()
-        dispatchGesture(g, null, null)
-    }
-
     private fun tapNode(n: AccessibilityNodeInfo) {
         val r = Rect()
         n.getBoundsInScreen(r)
-        tapAt(r.centerX().toFloat(), r.centerY().toFloat())
+        val p = Path()
+        p.moveTo(r.centerX().toFloat(), r.centerY().toFloat())
+        val g = GestureDescription.Builder()
+            .addStroke(GestureDescription.StrokeDescription(p, 0, 60)).build()
+        dispatchGesture(g, null, null)
     }
 
     // ---------- screen helpers ----------
